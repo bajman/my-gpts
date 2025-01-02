@@ -1,0 +1,1270 @@
+openapi: 3.1.0
+info:
+  title: Custom Notion GPT Integration
+  version: 1.3.0
+  description: >
+    A comprehensive OpenAPI 3.1.0 specification for integrating a GPT-based system with
+    the Notion API. It covers creating, retrieving, updating, archiving, querying,
+    searching Notion databases and pages, including handling hierarchical page
+    structures with pagination and filtering.
+
+servers:
+  - url: https://api.notion.com/v1
+    description: Main Notion API server
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  ########################################################
+  # REUSABLE SCHEMAS
+  ########################################################
+  schemas:
+
+    ########################################################
+    # Parent (REVISED)
+    ########################################################
+    Parent:
+      oneOf:
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: ["page_id"]
+            page_id:
+              type: string
+              format: uuid
+              description: >
+                The UUID of the parent page where the new page or database is to be created.
+          required:
+            - type
+            - page_id
+
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: ["database_id"]
+            database_id:
+              type: string
+              format: uuid
+              description: >
+                The UUID of the parent database where the new page or database is to be created.
+          required:
+            - type
+            - database_id
+
+        - type: object
+          properties:
+            type:
+              type: string
+              enum: ["workspace"]
+            workspace:
+              type: boolean
+              description: >
+                A boolean indicating whether to create the page or database at the root
+                of the workspace.
+          required:
+            - type
+            - workspace
+
+      description: >
+        The parent object determines where the database or page is created. 
+        It must match exactly one of the three shapes above (page_id, database_id, or workspace).
+
+    ########################################################
+    # RichText
+    ########################################################
+    RichText:
+      type: array
+      items:
+        type: object
+        properties:
+          type:
+            type: string
+            enum: [text, mention, equation]
+            description: The type of rich text object
+          text:
+            type: object
+            properties:
+              content:
+                type: string
+                description: The text content
+              link:
+                type: object
+                properties:
+                  url:
+                    type: string
+                    format: uri
+                    description: The URL linked to the text
+          annotations:
+            type: object
+            properties:
+              bold:
+                type: boolean
+              italic:
+                type: boolean
+              strikethrough:
+                type: boolean
+              underline:
+                type: boolean
+              code:
+                type: boolean
+              color:
+                type: string
+                enum: [default, gray, brown, orange, yellow, green, blue, purple, pink, red]
+          plain_text:
+            type: string
+          href:
+            type: string
+            format: uri
+          mention:
+            type: object
+            properties:
+              type:
+                type: string
+                enum: [database, page, user, date]
+              database:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+              page:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+              user:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+              date:
+                type: object
+                properties:
+                  start:
+                    type: string
+                    format: date-time
+                  end:
+                    type: string
+                    format: date-time
+          equation:
+            type: object
+            properties:
+              expression:
+                type: string
+        required:
+          - type
+
+    ########################################################
+    # Title
+    ########################################################
+    Title:
+      type: array
+      items:
+        $ref: '#/components/schemas/RichText'
+      description: >
+        A title is required for any database or page creation. It contains text content and
+        an optional link.
+
+    ########################################################
+    # TitleProperty
+    ########################################################
+    TitleProperty:
+      type: object
+      properties:
+        title:
+          $ref: '#/components/schemas/RichText'
+      description: >
+        Schema for a title property. This is used for defining the title of a page
+        or database entry.
+
+    ########################################################
+    # CheckboxProperty
+    ########################################################
+    CheckboxProperty:
+      type: object
+      properties:
+        checkbox:
+          type: boolean
+      description: >
+        Schema for a checkbox property, commonly used for tracking completion
+        or boolean states.
+
+    ########################################################
+    # PropertyDefinition
+    ########################################################
+    PropertyDefinition:
+      type: object
+      required:
+        - type
+        - name
+      properties:
+        type:
+          type: string
+          enum:
+            - title
+            - rich_text
+            - number
+            - select
+            - multi_select
+            - date
+            - people
+            - files
+            - checkbox
+            - url
+            - email
+            - phone_number
+            - formula
+            - relation
+            - rollup
+            - created_time
+            - created_by
+            - last_edited_time
+            - last_edited_by
+          description: The property type
+        name:
+          type: string
+          description: Display label for the property
+        options:
+          type: array
+          description: >
+            Options for select or multi_select properties. This field is required
+            if `type` is `select` or `multi_select`.
+          items:
+            type: object
+            required:
+              - name
+            properties:
+              name:
+                type: string
+              color:
+                type: string
+                enum: [default, gray, brown, orange, yellow, green, blue, purple, pink, red]
+      description: >
+        A definition of how a property is configured in a Notion database. Depending on
+        the `type`, different fields are expected (e.g., `options` for select/multi_select).
+
+    ########################################################
+    # Properties
+    ########################################################
+    Properties:
+      type: object
+      description: >
+        Defines a map of property names to property definitions or assigned values.
+        Example when creating or updating a page:
+        ```
+        {
+          "title": {
+            "title": [
+              {
+                "type": "text",
+                "text": { "content": "Page Title Here" }
+              }
+            ]
+          },
+          "Status": {
+            "select": { "name": "In Progress" }
+          },
+          "Tags": {
+            "multi_select": [
+              { "name": "Work" },
+              { "name": "Important" }
+            ]
+          }
+        }
+        ```
+      # A minimal 'properties' object to avoid "object schema missing properties" errors
+      properties: {}
+      # The real shape of 'Properties' is enforced through `additionalProperties`
+      additionalProperties:
+        oneOf:
+          - $ref: '#/components/schemas/TitleProperty'
+          - type: object
+            properties:
+              rich_text:
+                $ref: '#/components/schemas/RichText'
+            required: [rich_text]
+            description: A Notion rich_text property
+          - type: object
+            properties:
+              select:
+                type: object
+                required:
+                  - name
+                properties:
+                  name:
+                    type: string
+                  color:
+                    type: string
+                    enum: [default, gray, brown, orange, yellow, green, blue, purple, pink, red]
+            required: [select]
+            description: A Notion select property
+          - type: object
+            properties:
+              multi_select:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    color:
+                      type: string
+                      enum: [default, gray, brown, orange, yellow, green, blue, purple, pink, red]
+            required: [multi_select]
+            description: A Notion multi_select property
+          - type: object
+            properties:
+              checkbox:
+                type: boolean
+            required: [checkbox]
+            description: A Notion checkbox property
+          - type: object
+            properties:
+              date:
+                type: object
+                properties:
+                  start:
+                    type: string
+                    format: date-time
+                  end:
+                    type: string
+                    format: date-time
+            required: [date]
+            description: A Notion date property
+
+    ########################################################
+    # DatabaseObject
+    ########################################################
+    DatabaseObject:
+      type: object
+      required:
+        - id
+        - title
+        - properties
+        - created_time
+        - last_edited_time
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique ID of the database
+        title:
+          $ref: '#/components/schemas/Title'
+        properties:
+          type: object
+          additionalProperties: true
+          description: >
+            The schema properties of the database (e.g., columns). Each key
+            matches a property name in the Notion interface.
+        created_time:
+          type: string
+          format: date-time
+          description: The date/time the database was created
+        last_edited_time:
+          type: string
+          format: date-time
+          description: The date/time the database was last edited
+
+    ########################################################
+    # PageObject
+    ########################################################
+    PageObject:
+      type: object
+      required:
+        - id
+        - properties
+        - parent
+        - url
+        - created_time
+        - last_edited_time
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique ID of the page
+        properties:
+          $ref: '#/components/schemas/Properties'
+        parent:
+          $ref: '#/components/schemas/Parent'
+        url:
+          type: string
+          format: uri
+          description: The publicly accessible URL of the Notion page
+        created_time:
+          type: string
+          format: date-time
+          description: When the page was created
+        last_edited_time:
+          type: string
+          format: date-time
+          description: When the page was last edited
+
+    ########################################################
+    # CreateDatabaseBody
+    ########################################################
+    CreateDatabaseBody:
+      type: object
+      required:
+        - parent
+        - title
+        - properties
+      properties:
+        parent:
+          $ref: '#/components/schemas/Parent'
+        title:
+          $ref: '#/components/schemas/Title'
+        properties:
+          type: object
+          description: >
+            Key/value pairs defining the database’s schema. Each key is
+            a property name; each value is a property definition.
+          additionalProperties:
+            $ref: '#/components/schemas/PropertyDefinition'
+      description: >
+        The `title` property is mandatory to prevent `UnrecognizedKwargsError`.
+      example:
+        parent:
+          type: workspace
+          workspace: true
+        title:
+          - type: text
+            text:
+              content: "Books I'm Reading"
+        properties:
+          title:
+            name: "title"
+            type: "title"
+          Author:
+            name: "Author"
+            type: "rich_text"
+          Genre:
+            name: "Genre"
+            type: "select"
+            options:
+              - name: "Fiction"
+              - name: "Non-Fiction"
+
+    ########################################################
+    # CreatePageBody (Title Required)
+    ########################################################
+    CreatePageBody:
+      type: object
+      required:
+        - parent
+        - properties
+      properties:
+        parent:
+          $ref: '#/components/schemas/Parent'
+        properties:
+          $ref: '#/components/schemas/Properties'
+          description: >
+            Defines the properties for the page. **Important**: To avoid
+            `UnrecognizedKwargsError`, ensure at least one property is typed
+            as `title` (or includes the page's title).
+        children:
+          type: array
+          description: Optional list of child blocks (headings, paragraphs, to-do lists, etc.)
+          items:
+            type: object
+            required:
+              - type
+            properties:
+              type:
+                type: string
+                enum: [heading_1, heading_2, heading_3, paragraph, to_do]
+                description: The type of the block
+              heading_1:
+                type: object
+                description: A level-1 heading block
+                properties:
+                  rich_text:
+                    $ref: '#/components/schemas/RichText'
+              heading_2:
+                type: object
+                description: A level-2 heading block
+                properties:
+                  rich_text:
+                    $ref: '#/components/schemas/RichText'
+              heading_3:
+                type: object
+                description: A level-3 heading block
+                properties:
+                  rich_text:
+                    $ref: '#/components/schemas/RichText'
+              paragraph:
+                type: object
+                description: A paragraph block
+                properties:
+                  rich_text:
+                    $ref: '#/components/schemas/RichText'
+              to_do:
+                type: object
+                description: A to-do block
+                properties:
+                  checked:
+                    type: boolean
+                    description: Whether the to-do is marked complete
+                  rich_text:
+                    $ref: '#/components/schemas/RichText'
+      example:
+        parent:
+          type: database_id
+          database_id: "db_123"
+        properties:
+          title:
+            title:
+              - type: text
+                text:
+                  content: "Meeting Notes"
+          Date:
+            date:
+              start: "2024-12-23T10:00:00Z"
+          Tags:
+            multi_select:
+              - name: "Work"
+              - name: "Project A"
+        children:
+          - type: heading_1
+            heading_1:
+              rich_text:
+                - type: text
+                  text:
+                    content: "Discussion Points"
+          - type: to_do
+            to_do:
+              checked: false
+              rich_text:
+                - type: text
+                  text:
+                    content: "Review project status"
+
+    ########################################################
+    # UpdatePageBody
+    ########################################################
+    UpdatePageBody:
+      type: object
+      description: >
+        Schema for updating a page. All fields are optional, enabling partial updates
+        (e.g., archiving the page or updating only a single property).
+      properties:
+        properties:
+          $ref: '#/components/schemas/Properties'
+          description: Updated property values
+        archived:
+          type: boolean
+          description: If true, archives (soft-deletes) the page
+        icon:
+          type: object
+          description: Optional icon for the page
+        cover:
+          type: object
+          description: Optional cover image for the page
+      example:
+        properties:
+          Status:
+            select:
+              name: "Completed"
+        archived: false
+
+    ########################################################
+    # QueryDatabaseBody
+    ########################################################
+    QueryDatabaseBody:
+      type: object
+      properties:
+        filter:
+          type: object
+          description: Complex filter object with possible nested conditions
+          oneOf:
+            - type: object
+              properties:
+                and:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+            - type: object
+              properties:
+                or:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: true
+          additionalProperties: true
+        sorts:
+          type: array
+          description: Sorting rules
+          items:
+            type: object
+            required:
+              - property
+              - direction
+            properties:
+              property:
+                type: string
+                description: Property name to sort by
+              direction:
+                type: string
+                enum: [ascending, descending]
+        start_cursor:
+          type: string
+          description: Cursor to paginate through results.
+        page_size:
+          type: integer
+          description: >
+            Number of results per page (batch size), maximum of 100. Default set to 50.
+          default: 50
+          maximum: 100
+      example:
+        filter:
+          and:
+            - property: "Genre"
+              select:
+                equals: "Fiction"
+            - property: "Status"
+              select:
+                equals: "In Progress"
+        sorts:
+          - property: "Last Edited"
+            direction: "descending"
+        page_size: 50
+
+    ########################################################
+    # ErrorResponse (Improved Error Handling)
+    ########################################################
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Detailed error message
+        details:
+          type: array
+          description: Additional context for resolving issues
+          items:
+            type: string
+      example:
+        error: "UnrecognizedKwargsError"
+        message: "Invalid properties schema. Ensure `title` is correctly structured."
+        details:
+          - "Property 'Genre' missing required 'options'."
+          - "Title property is mandatory."
+
+  ########################################################
+  # RESPONSES
+  ########################################################
+  responses:
+    DatabaseResponse:
+      description: Successfully retrieved or created database
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/DatabaseObject'
+          example:
+            id: "db_123"
+            title:
+              - type: text
+                text:
+                  content: "Books I'm Reading"
+            properties:
+              title:
+                type: "title"
+              Author:
+                type: "rich_text"
+              Genre:
+                type: "select"
+                options:
+                  - name: "Fiction"
+                  - name: "Non-Fiction"
+            created_time: "2024-01-01T12:00:00Z"
+            last_edited_time: "2024-01-01T12:00:00Z"
+
+    PageResponse:
+      description: Successfully retrieved or created page
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/PageObject'
+          example:
+            id: "page_xyz456"
+            properties:
+              title:
+                type: "title"
+                title:
+                  - type: text
+                    text:
+                      content: "Meeting Notes"
+              Date:
+                type: "date"
+                date:
+                  start: "2024-12-23T10:00:00Z"
+              Tags:
+                type: "multi_select"
+                multi_select:
+                  - name: "Work"
+                  - name: "Project A"
+            parent:
+              type: "database_id"
+              database_id: "db_123"
+            url: "https://www.notion.so/Meeting-Notes-xyz456"
+            created_time: "2024-12-23T10:10:00Z"
+            last_edited_time: "2024-12-23T10:15:00Z"
+
+    ErrorResponse:
+      description: Error occurred
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+paths:
+  ##########################################################
+  # 1. CREATE A DATABASE
+  ##########################################################
+  /databases:
+    post:
+      operationId: createDatabase
+      summary: Create a new database
+      description: >
+        Creates a new database in Notion with the specified schema. Ensure that the title
+        is correctly formatted to avoid validation errors.
+      parameters:
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDatabaseBody'
+            example:
+              parent:
+                type: "workspace"
+                workspace: true
+              title:
+                - type: "text"
+                  text:
+                    content: "Books I'm Reading"
+              properties:
+                title:
+                  name: "title"
+                  type: "title"
+                Author:
+                  name: "Author"
+                  type: "rich_text"
+                Genre:
+                  name: "Genre"
+                  type: "select"
+                  options:
+                    - name: "Fiction"
+                    - name: "Non-Fiction"
+      responses:
+        '200':
+          $ref: '#/components/responses/DatabaseResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '403':
+          $ref: '#/components/responses/ErrorResponse'
+
+  ##########################################################
+  # 2. RETRIEVE A DATABASE
+  ##########################################################
+  /databases/{database_id}:
+    get:
+      operationId: retrieveDatabase
+      summary: Retrieve a database’s schema
+      description: >
+        Retrieves metadata about a Notion database, including its title,
+        properties (schema), creation time, and last edited time.
+      parameters:
+        - name: database_id
+          in: path
+          required: true
+          description: The UUID of the database to retrieve
+          schema:
+            type: string
+            format: uuid
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+      responses:
+        '200':
+          $ref: '#/components/responses/DatabaseResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  ##########################################################
+  # 3. QUERY A DATABASE
+  ##########################################################
+  /databases/{database_id}/query:
+    post:
+      operationId: queryDatabase
+      summary: Query a database
+      description: >
+        Retrieves a list of database entries that match the specified filters.
+      parameters:
+        - name: database_id
+          in: path
+          required: true
+          description: The UUID of the database to query.
+          schema:
+            type: string
+            format: uuid
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryDatabaseBody'
+            example:
+              filter:
+                and:
+                  - property: "Genre"
+                    select:
+                      equals: "Fiction"
+                  - property: "Status"
+                    select:
+                      equals: "In Progress"
+              sorts:
+                - property: "Last Edited"
+                  direction: "descending"
+              page_size: 50
+      responses:
+        '200':
+          description: A list of matching database entries with pagination.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    description: A list of matching pages.
+                    items:
+                      $ref: '#/components/schemas/PageObject'
+                  next_cursor:
+                    type: string
+                    description: Cursor for the next page of results.
+                  has_more:
+                    type: boolean
+                    description: Whether there are more results to be fetched.
+              example:
+                results:
+                  - id: "page_001"
+                    properties:
+                      title:
+                        type: "title"
+                        title:
+                          - type: text
+                            text:
+                              content: "Dune"
+                      Author:
+                        type: "rich_text"
+                        rich_text:
+                          - type: text
+                            text:
+                              content: "Frank Herbert"
+                      Genre:
+                        type: "select"
+                        select:
+                          name: "Fiction"
+                    parent:
+                      type: "database_id"
+                      database_id: "db_123"
+                    url: "https://www.notion.so/Dune-001"
+                    created_time: "2024-01-03T10:00:00Z"
+                    last_edited_time: "2024-01-03T12:00:00Z"
+                next_cursor: null
+                has_more: false
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  ##########################################################
+  # 4. CREATE A PAGE
+  ##########################################################
+  /pages:
+    post:
+      operationId: createPage
+      summary: Create a new page entry in a database
+      description: >
+        Creates a new entry in the specified Notion database. Ensure that the title
+        and parent relationship are correctly defined.
+      parameters:
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePageBody'
+            example:
+              parent:
+                type: "database_id"
+                database_id: "db_123"
+              properties:
+                title:
+                  type: "title"
+                  title:
+                    - type: text
+                      text:
+                        content: "Meeting Notes"
+                Date:
+                  type: "date"
+                  date:
+                    start: "2024-12-23T10:00:00Z"
+                Tags:
+                  type: "multi_select"
+                  multi_select:
+                    - name: "Work"
+                    - name: "Project A"
+              children:
+                - type: heading_1
+                  heading_1:
+                    rich_text:
+                      - type: text
+                        text:
+                          content: "Discussion Points"
+                - type: to_do
+                  to_do:
+                    checked: false
+                    rich_text:
+                      - type: text
+                        text:
+                          content: "Review project status"
+      responses:
+        '200':
+          $ref: '#/components/responses/PageResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  ##########################################################
+  # 5. UPDATE OR ARCHIVE A PAGE
+  ##########################################################
+  /pages/{page_id}:
+    patch:
+      operationId: updatePage
+      summary: Update an existing database entry
+      description: >
+        Updates properties of an existing database entry in Notion.
+        You can update any combination of properties, archive/unarchive the page,
+        or modify the icon and cover image.
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          description: The UUID of the database entry to update.
+          schema:
+            type: string
+            format: uuid
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePageBody'
+            example:
+              properties:
+                Status:
+                  select:
+                    name: "Completed"
+              archived: false
+      responses:
+        '200':
+          $ref: '#/components/responses/PageResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  ##########################################################
+  # 6. SEARCH PAGES
+  ##########################################################
+  /search:
+    post:
+      operationId: searchPages
+      summary: Search for pages and subpages in Notion workspace
+      description: >
+        Lists all pages and subpages within a Notion workspace. Supports pagination
+        for large workspaces and filtering to narrow the scope of data retrieval,
+        preventing excessive response sizes.
+      parameters:
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: Search query for filtering specific pages (optional).
+                filter:
+                  type: object
+                  description: >
+                    Filter to search only for pages or specific sections within the workspace.
+                  properties:
+                    value:
+                      type: string
+                      enum: [page, database]
+                      description: The type of object to filter by.
+                    property:
+                      type: string
+                      enum: [object]
+                      description: The property to filter on.
+                sort:
+                  type: object
+                  properties:
+                    direction:
+                      type: string
+                      enum: [ascending, descending]
+                      description: The direction to sort results.
+                    timestamp:
+                      type: string
+                      enum: [last_edited_time]
+                      description: The timestamp field to sort by.
+                start_cursor:
+                  type: string
+                  description: Cursor to paginate through results (optional).
+                page_size:
+                  type: integer
+                  description: >
+                    Number of results per page, maximum 100. Default set to 50.
+                  default: 50
+                  maximum: 100
+              required:
+                - filter
+            example:
+              query: "Project A"
+              filter:
+                value: "page"
+                property: "object"
+              sort:
+                direction: "ascending"
+                timestamp: "last_edited_time"
+              start_cursor: "cursor_abc123"
+              page_size: 50
+      responses:
+        '200':
+          description: A list of matching pages and subpages with pagination support.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    description: A list of matching pages.
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        object:
+                          type: string
+                          description: Either 'page' or 'database'.
+                        title:
+                          $ref: '#/components/schemas/RichText'
+                        created_time:
+                          type: string
+                          format: date-time
+                        last_edited_time:
+                          type: string
+                          format: date-time
+                        url:
+                          type: string
+                          format: uri
+                        parent:
+                          $ref: '#/components/schemas/Parent'
+                  next_cursor:
+                    type: string
+                    description: Cursor for the next page of results.
+                  has_more:
+                    type: boolean
+                    description: Whether there are more results to be fetched.
+              example:
+                results:
+                  - id: "page_001"
+                    object: "page"
+                    title:
+                      - type: text
+                        text:
+                          content: "Dune"
+                    created_time: "2024-01-03T10:00:00Z"
+                    last_edited_time: "2024-01-03T12:00:00Z"
+                    url: "https://www.notion.so/Dune-001"
+                    parent:
+                      type: "database_id"
+                      database_id: "db_123"
+                next_cursor: null
+                has_more: false
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+
+  ##########################################################
+  # 7. LIST SUBPAGES
+  ##########################################################
+  /pages/{page_id}/children:
+    get:
+      operationId: listSubPages
+      summary: List subpages of a specific Notion page (recursive)
+      description: >
+        Retrieves all subpages of a specific Notion page, including nested subpages
+        at all levels. Supports pagination to handle large subpage structures.
+      parameters:
+        - name: page_id
+          in: path
+          required: true
+          description: The UUID of the Notion page.
+          schema:
+            type: string
+            format: uuid
+        - name: Notion-Version
+          in: header
+          required: true
+          description: The Notion API version to use.
+          schema:
+            type: string
+            example: '2022-06-28'
+        - name: start_cursor
+          in: query
+          required: false
+          description: Cursor to paginate through results (optional).
+          schema:
+            type: string
+        - name: page_size
+          in: query
+          required: false
+          description: >
+            Number of results per page, maximum 100. Default set to 50.
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+      responses:
+        '200':
+          description: A list of all subpages within the specified page, including nested subpages.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    description: A list of all subpages (recursive).
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        object:
+                          type: string
+                          description: Either 'page' or 'database'.
+                        title:
+                          $ref: '#/components/schemas/RichText'
+                        created_time:
+                          type: string
+                          format: date-time
+                        last_edited_time:
+                          type: string
+                          format: date-time
+                        url:
+                          type: string
+                          format: uri
+                  next_cursor:
+                    type: string
+                    description: Cursor for the next page of results.
+                  has_more:
+                    type: boolean
+                    description: Whether there are more results to be fetched.
+              example:
+                results:
+                  - id: "page_002"
+                    object: "page"
+                    title:
+                      - type: text
+                        text:
+                          content: "Project A Overview"
+                    created_time: "2024-02-01T09:00:00Z"
+                    last_edited_time: "2024-02-02T10:00:00Z"
+                    url: "https://www.notion.so/Project-A-Overview-002"
+                next_cursor: null
+                has_more: false
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
